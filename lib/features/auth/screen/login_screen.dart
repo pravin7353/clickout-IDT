@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../home/screens/home_screen.dart';
 import '../providers/auth_controller.dart';
+import '../models/staff_model.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -14,6 +15,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final TextEditingController _phoneCtrl = TextEditingController();
   final TextEditingController _otpCtrl = TextEditingController();
   bool _otpSent = false;
+  bool _isResolving = false;
 
   final Color darkBaseColor = const Color(0xFF101010);
   final Color brandGreen = const Color(0xFF16A34A);
@@ -30,6 +32,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       await ref.read(authProvider.notifier).sendOTP(_phoneCtrl.text);
       setState(() => _otpSent = true);
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(e.toString())));
@@ -38,26 +41,48 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   void _verifyOtp() async {
     if (_otpCtrl.text.length < 6) return;
+    setState(() => _isResolving = true);
     try {
       await ref.read(authProvider.notifier).verifyOTP(_otpCtrl.text);
+
+      // 🔒 Guard state: Wait for currentStaffProvider to emit non-null IDT staff model
+      // Prevents race condition where HomeScreen mounts before stream resolves
+      StaffModel? staff;
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (DateTime.now().isBefore(deadline) && mounted) {
+        staff = ref.read(currentStaffProvider).value;
+        if (staff != null) break;
+        await Future.delayed(const Duration(milliseconds: 250));
+      }
+
+      if (staff == null) {
+        throw "Could not resolve IDT staff profile. Please contact your admin.";
+      }
+
       if (mounted) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
             builder: (context) => const HomeScreen(),
-          ), // Update destination
+          ),
         );
       }
     } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isResolving = false);
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final isLoading = ref.watch(authProvider);
+    final isLoading = ref.watch(authProvider) || _isResolving;
 
     return Scaffold(
       backgroundColor: darkBaseColor,

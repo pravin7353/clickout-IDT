@@ -39,6 +39,7 @@ dependencies:
   firebase_core: ^4.6.0
   firebase_auth: 6.3.0 # 👈 ADDED (Phone Login ke liye zaroori)
   cloud_firestore: ^6.2.0
+  cloud_functions: ^6.1.0
   flutter_riverpod: ^3.3.1
   
   # 🚀 Scanner Packages
@@ -51,6 +52,7 @@ dependencies:
 
   # 🚀 UI Fonts
   google_fonts: ^6.2.1 # 👈 ADDED (Splash & Login fonts ke liye)
+  sendotp_flutter_sdk: 0.0.2
 
 dev_dependencies:
   flutter_test:
