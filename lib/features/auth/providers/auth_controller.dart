@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import '../models/staff_model.dart';
 
+final _useMsg91 = true; // feature flag — set false to instantly revert to Firebase Phone Auth
+
 final authStateProvider = StreamProvider<User?>((ref) {
   return FirebaseAuth.instance.authStateChanges();
 });
@@ -40,6 +42,7 @@ class AuthNotifier extends Notifier<bool> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   String? _verificationId;
+  String? _pendingPhone;
 
   @override
   bool build() => false;
@@ -76,27 +79,37 @@ class AuthNotifier extends Notifier<bool> {
         }
       }
 
-      // 🚀 Firebase Phone Auth
-      await _auth.verifyPhoneNumber(
-        phoneNumber: '+91$phone',
-        verificationCompleted: (PhoneAuthCredential credential) async {
-          await _auth.signInWithCredential(credential);
-          await Future.delayed(const Duration(seconds: 2));
-          await _auth.currentUser?.getIdToken(true);
-          state = false;
-        },
-        verificationFailed: (FirebaseAuthException e) {
-          state = false;
-          throw e.message ?? "Verification failed";
-        },
-        codeSent: (String verificationId, int? resendToken) {
-          _verificationId = verificationId;
-          state = false;
-        },
-        codeAutoRetrievalTimeout: (String verificationId) {
-          _verificationId = verificationId;
-        },
-      );
+      if (_useMsg91) {
+        final callable = FirebaseFunctions.instance.httpsCallable(
+          'sendMsg91Otp',
+          options: HttpsCallableOptions(timeout: const Duration(seconds: 15)),
+        );
+        await callable.call({'phone': phone, 'appId': 'idt'});
+        _pendingPhone = phone;
+        state = false;
+      } else {
+        // 🚀 Firebase Phone Auth (fallback)
+        await _auth.verifyPhoneNumber(
+          phoneNumber: '+91$phone',
+          verificationCompleted: (PhoneAuthCredential credential) async {
+            await _auth.signInWithCredential(credential);
+            await Future.delayed(const Duration(seconds: 2));
+            await _auth.currentUser?.getIdToken(true);
+            state = false;
+          },
+          verificationFailed: (FirebaseAuthException e) {
+            state = false;
+            throw e.message ?? "Verification failed";
+          },
+          codeSent: (String verificationId, int? resendToken) {
+            _verificationId = verificationId;
+            state = false;
+          },
+          codeAutoRetrievalTimeout: (String verificationId) {
+            _verificationId = verificationId;
+          },
+        );
+      }
     } catch (e) {
       state = false;
       throw e.toString();
@@ -105,21 +118,34 @@ class AuthNotifier extends Notifier<bool> {
 
   // 2. VERIFY OTP + call resolveStaffSession for session context
   Future<void> verifyOTP(String otp) async {
-    if (_verificationId == null) throw "Please request OTP first";
+    if (_useMsg91 ? _pendingPhone == null : _verificationId == null) {
+      throw "Please request OTP first";
+    }
     state = true;
     try {
-      final PhoneAuthCredential credential = PhoneAuthProvider.credential(
-        verificationId: _verificationId!,
-        smsCode: otp,
-      );
-      await _auth.signInWithCredential(credential);
-
-      // Force-refresh token so Cloud Function sees verified phone claim
-      await Future.delayed(const Duration(seconds: 2));
-      await _auth.currentUser?.getIdToken(true);
+      if (_useMsg91) {
+        if (_pendingPhone == null) throw "Please request OTP first";
+        final verifyCallable = FirebaseFunctions.instance.httpsCallable(
+          'verifyMsg91OtpAndSignIn',
+          options: HttpsCallableOptions(timeout: const Duration(seconds: 15)),
+        );
+        final result = await verifyCallable.call({'phone': _pendingPhone, 'otp': otp});
+        final customToken = result.data['customToken'] as String;
+        await _auth.signInWithCustomToken(customToken);
+        await Future.delayed(const Duration(seconds: 2));
+        await _auth.currentUser?.getIdToken(true);
+      } else {
+        final PhoneAuthCredential credential = PhoneAuthProvider.credential(
+          verificationId: _verificationId!,
+          smsCode: otp,
+        );
+        await _auth.signInWithCredential(credential);
+        await Future.delayed(const Duration(seconds: 2));
+        await _auth.currentUser?.getIdToken(true);
+      }
 
       // Sync UID to staff doc via resolveStaffSession (fire-and-forget is acceptable;
-      // currentStaffProvider will reactively pick up the correct doc by phone anyway)
+      // currentStaffProvider stream still works via phone lookup
       try {
         final callable = FirebaseFunctions.instance.httpsCallable(
           'resolveStaffSession',
